@@ -3,11 +3,18 @@ import json
 import os
 import requests
 import time
-import psutil
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 import os
 import math
+
+
+
+#
+# GB (Gigabyte) and GiB (Gibibyte) are both units of digital storage, but they differ in their base measurement.
+#   - GB uses the decimal system, 1 GB equals 1,000,000,000 bytes
+#   - GiB uses the binary system, 1 GiB equals 1,073,741,824 bytes
+#
 
 
 # ====== CONFIGURATION ======
@@ -73,73 +80,48 @@ def get_all_vms():
     return all_vms
 
 
-def get_nas_stats(storage_data):
-    storage = next((s for s in storage_data if s.get("storage") == "nas-public"), None)
-    if storage:
-        return [
-            {
-                "device_id": "proxmox_nas",
-                "device_model": "NAS",
-                "friendly_name": "NAS",
-                "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_nas",
-                "stats": {
-                    "proxmox_nas_disk_size_tb": round(storage.get("total", 0) / (1000 ** 4), 2),  # TB
-                    "proxmox_nas_disk_used_gb": round(storage.get("used", 0) / (1000 ** 3), 2),   # GB
-                    "proxmox_nas_disk_used_percent": round(storage.get("used_fraction", 0) * 100, 1)
-                }
-            }
-        ]
-    return None
+def bytes_to_mib(num_bytes):
+    # MB is a base-10 unit, 1 MB equals 1,000,000 bytes
+    # MiB is a base-2 unit. 1 MiB equals 1,048,576 bytes
+    return num_bytes / (1024 * 1024)
+
+def bytes_to_gib(num_bytes):
+    # GB uses the decimal system, 1 GB equals 1,000,000,000 bytes
+    # GiB uses the binary system, 1 GiB equals 1,073,741,824 bytes
+    return num_bytes / (1024 * 1024 * 1024)
+
+def bytes_to_gb(num_bytes):
+    # GB uses the decimal system, 1 GB equals 1,000,000,000 bytes
+    # GiB uses the binary system, 1 GiB equals 1,073,741,824 bytes
+    return num_bytes / (1000 * 1000 * 1000)
+
+def bytes_to_tb(num_bytes):
+    # TB uses the decimal system, 1 TB equals 1,000,000,000,000 bytes
+    # TiB uses the binary system, 1 TiB equals 1,099,511,627,776 bytes
+    return num_bytes / (1000 * 1000 * 1000 * 1000)
 
 
-
-# def get_host_stats(host_data):
-#         node_status = get_json(f"/nodes/{PROXMOX_NODE}/status")
-#     total_mem = node_status["memory"]["total"]
-#     used_mem = node_status["memory"]["used"]
-#     total_disk = node_status["rootfs"]["total"]
-#     used_disk = node_status["rootfs"]["used"]
-#     stats["host"] = [
-#         {
-#             "device_id": "proxmox_host",
-#             "device_model": "Proxmox Host",
-#             "friendly_name": "Proxmox Host",
-#             "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
-#             "stats": {
-#                 "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
-#                 "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
-#                 "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
-#             }
-#         }
-#     ]
-
-
-def build_friendly_name(vmid, name, vm_type):
+def get_friendly_name(vmid, name, vm_type):
     """
-    Build a friendly name for the sensor based on the VM type and ID.
+    Get a friendly name for the sensor based on the VM type and ID
     """
     friendly_name = name or f"{vm_type} {vmid}"
     return f"{friendly_name.replace('_', ' ').replace('-', ' ').title()} {'VM' if vm_type == 'qemu' else 'LXC'}"
 
 
-def collect_stats():
-    """
-    Collect stats from the Proxmox API and structure them for MQTT publishing.
-    """
-    stats = {}
-
-    vms = get_all_vms()
-
-
-
-
-    # TODO- extract this into a separate function
+def get_host_stats(vms):
     # Get host node stats
     node_status = get_json(f"/nodes/{PROXMOX_NODE}/status")
     #print(json.dumps(node_status, indent=2))
     
-    total_mem = node_status["memory"]["total"]   # This is what's not being used by vms and containers right now, not total allocated
-    # for example, host has 16gb of memory, this is showing 13gb right now because add up actual memory usage of all vms/cts is about 3 GB
+    # Total host memory
+    #   - This is how much of the host's memory that is currently available, excluding the memory
+    #     being used by vms and containers right now
+    #   - This is NOT the amount of physical memory installed on the host
+    #   - An example: the host has 16gb of physical memory, and all the VMs/containers are currently
+    #     using 3GB (they're allotted 11GB). This shows 13GB.
+    total_host_mem = node_status["memory"]["total"]
+    
     used_mem = node_status["memory"]["used"]
     vm_allocated_mem = sum(vm.get("maxmem", 0) for vm in vms)
     #print(f"Total Memory: {total_mem} bytes ({round(total_mem/1024/1024/1024)} GB), Used Memory: {used_mem} bytes ({round(used_mem/1024/1024/1024)} GB)")
@@ -151,87 +133,120 @@ def collect_stats():
     vm_allocated_cpus = sum(vm.get("cpus", 0) for vm in vms)
     unallocated_cpus = total_cpus - vm_allocated_cpus
 
-    unallocated_mem = total_mem - vm_allocated_mem
+    unallocated_mem = total_host_mem - vm_allocated_mem
 
     #print(f"VMs and containers have allotted memory: {vm_allocated_mem} bytes ({round(vm_allocated_mem / 1024 / 1024 / 1024, 2)} GB)")
     #print(f"Unallocated memory for host: {unallocated_mem} bytes ({round(unallocated_mem / 1024 / 1024 / 1024, 2)} GB)")
 
-    stats["host"] = [
+    return [
         {
             "device_id": "proxmox_host",
             "device_model": "Proxmox Host",
             "friendly_name": "Proxmox Host",
+
+            # I need this in collect_stats(), so I'll return in the 
+            "total_host_mem": total_host_mem,
+
             "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
             "stats": {
-                "proxmox_host_disk_size_gb": math.ceil(total_disk / (1024 ** 3)), 
+                "proxmox_host_disk_size_gb": math.ceil(bytes_to_gib(total_disk)), 
+                "proxmox_host_total_cpus": total_cpus,
                 "proxmox_host_unallocated_cpus": unallocated_cpus,
 
                 # TODO LATER- I'm so confused !!!!
-
+                #
                 # I want memory to be what's not allocated to VMs, not the total memory of the host
                 # I have 16GB of memory, 11 GB is allotted to vms and containers, I want this to show 5 GB
                 # But Proxmox says the total memory of the host is 13GB (apparently Proxmox, etc is using 3GB of memory),
                 # so that means I have ~ 1.5GB - 2GB of memory for the Proxmox host if all the containers max out
-
+                #
                 # Or, is used_mem (which is 5GB) is that what I want? Preoxmox API documentation is not clear. This
                 # looks like it could be true, but everything I see implies it is not
-
+                #
                 #"proxmox_host_memory_size_gb": 
 
-                "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
+                "proxmox_host_memory_used_percent": round(used_mem / total_host_mem * 100, 2),
                 "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
                 "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
             }
         }
     ]
-    #stats["host"] = get_host_stats(...)
 
 
+def get_vm_stats(vmid, vm_type, total_host_mem):
+    vm_status = get_json(f"/nodes/{PROXMOX_NODE}/{vm_type}/{vmid}/status/current")
+
+    mem_alloc = vm_status.get("maxmem", 0)
+    mem_used = vm_status.get("mem", 0)
+    uptime = vm_status.get("uptime", 0)
+    cpus = vm_status.get("cpus", 0)
+
+    # Yes, this conversion is weird, but 32GB can be 32-34GB depending on how you do the math,
+    # and doing it this way yields 32GB- convert to GiB and then round up.
+    disk_alloc_gb = math.ceil(bytes_to_gib(vm_status.get("maxdisk", 0)))
+    disk_used_gb = math.ceil(bytes_to_gib(vm_status.get("disk", 0)))
+
+    sensor_key_prefix = f"proxmox_{vm_type}_{vmid}"
+
+    return {
+        "friendly_name": get_friendly_name(vmid, vm_status.get("name"), vm_type),
+        "device_id": sensor_key_prefix,
+        "device_model": "VM" if vm_type == "qemu" else "LXC",
+        "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_{vm_type}/{vmid}",
+        "stats": {
+            f"{sensor_key_prefix}_uptime_seconds": uptime,
+            f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
+            f"{sensor_key_prefix}_disk_used_percent": round(disk_used_gb / disk_alloc_gb * 100, 2) if disk_alloc_gb else 0,
+            f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem * 100, 2),
+            f"{sensor_key_prefix}_cpus": cpus,
+            f"{sensor_key_prefix}_memory_allocated_mb": int(bytes_to_mib(mem_alloc)),
+            f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc_gb, 2)
+        }
+    }
+
+
+def get_nas_stats(storage_data, storage_name):
+    storage = next((s for s in storage_data if s.get("storage") == storage_name), None)
+    if storage:
+        return [
+            {
+                "device_id": "proxmox_nas",
+                "device_model": "NAS",
+                "friendly_name": "NAS",
+                "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_nas",
+                "stats": {
+                    # Yes, using TB/GB (decimal/1000) instead of TiB/GiB (binary/1024) here is inconsistent, but it matches
+                    # the Proxmox dashboard and the stated capacity of the NAS (6 TB)
+                    "proxmox_nas_disk_size_tb": round(bytes_to_tb(storage.get("total", 0)), 2),
+                    "proxmox_nas_disk_used_gb": round(bytes_to_gb(storage.get("used", 0)), 2),
+                    "proxmox_nas_disk_used_percent": round(storage.get("used_fraction", 0) * 100, 1)
+                }
+            }
+        ]
+    return None
+
+
+def collect_stats():
+    """
+    Collect stats from the Proxmox API and structure them for MQTT publishing
+    """
+    vms = get_all_vms()
+    stats = {
+        "host": get_host_stats(vms),
+        "vms": [],
+        "nas": get_nas_stats(get_json(f"/nodes/{PROXMOX_NODE}/storage"), "nas-public")
+    }
+
+    # Get host stats
+    stats["host"] = get_host_stats(vms)
 
     # Get VM/container stats
-    # TODO- extract this into a separate function
     stats["vms"] = []
-    total_host_mem_MB = total_mem / 1024 / 1024
-
     for vm in vms:
-        vmid = vm["vmid"]
-        vm_type = vm["type"]
-
-        # Get detailed info required for accurate metrics
-        vm_status = get_json(f"/nodes/{PROXMOX_NODE}/{vm_type}/{vmid}/status/current")
-
-        mem_alloc = vm_status.get("maxmem", 0) / 1024 / 1024
-        mem_used = vm_status.get("mem", 0) / 1024 / 1024
-        uptime = vm_status.get("uptime", 0)
-        cpus = vm_status.get("cpus", 0)
-
-        # Yes, this conversion is weird, but 32GB can be 33-34GB depending on how you do the math
-        disk_alloc = math.ceil(vm_status.get("maxdisk", 0) / (1024 ** 3))  # Convert to GiB and round up
-        disk_used = math.ceil(vm_status.get("disk", 0) / (1024 ** 3))  # Convert to GiB and round up
-
-        sensor_key_prefix = f"proxmox_{vm_type}_{vmid}"
-        vm_data = {
-            "vmid": str(vmid),
-            "type": vm_type,
-            "friendly_name": build_friendly_name(vmid, vm_status.get("name"), vm_type),
-            "device_id": sensor_key_prefix,
-            "device_model": "VM" if vm_type == "qemu" else "LXC",
-            "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_{vm_type}/{vmid}",
-            "stats": {
-                f"{sensor_key_prefix}_uptime_seconds": uptime,
-                f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
-                f"{sensor_key_prefix}_disk_used_percent": round(disk_used / disk_alloc * 100, 2) if disk_alloc else 0,
-                f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem_MB * 100, 2),
-                f"{sensor_key_prefix}_cpus": cpus,
-                f"{sensor_key_prefix}_memory_allocated_mb": int(mem_alloc),
-                f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc, 2)
-            }
-        }
-
-        stats["vms"].append(vm_data)
+        stats["vms"].append(get_vm_stats(vm["vmid"], vm["type"], stats["host"][0]["total_host_mem"]))
 
     # Get NAS stats
-    stats["nas"] = get_nas_stats(get_json(f"/nodes/{PROXMOX_NODE}/storage"))
+    stats["nas"] = get_nas_stats(get_json(f"/nodes/{PROXMOX_NODE}/storage"), "nas-public")
 
     return stats
 
@@ -276,12 +291,11 @@ def publish_discovery_message(client, sensor_key, name, state_topic, device_info
         payload["icon"] = icon
 
     topic = f"{MQTT_DISCOVERY_TOPIC}/{sensor_key}/config"
-    print(f"Publishing discovery message for {name} ({sensor_key}) to {topic} ...")
-    print(f"    {json.dumps(payload, indent=2)}")
     client.publish(f"{topic}", json.dumps(payload), retain=True)
     print(f"Published discovery message to: {topic}")
-    
-    time.sleep(0.5)  # Add a delay of 0.5 seconds between messages
+
+    # Home Assistant requires a short delay between discovery messages to avoid overwhelming the broker
+    time.sleep(0.5)
 
 
 def publish_sensor_discovery_by_device(client, device_id, device_model, device_friendly_name, state_topic_prefix, device_stats):
@@ -316,9 +330,8 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
         "name": device_friendly_name,
     }
     
-    # Loop through all the list of sensors and publish discovery messages for each one
     for sensor_key, value in device_stats.items():
-        # Find the appropriate sensor definition
+        # Find the appropriate sensor definition for this statistic
         sensor_definition = next((s for s in sensor_definitions if sensor_key.endswith(s["sensor_key"])), None)
 
         publish_discovery_message(
@@ -335,7 +348,7 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
 
 def publish_discovery_messages(stats):
     """
-    Publish MQTT discovery messages for all VMs/CTs, host, and NAS to Home Assistant.
+    Publish MQTT discovery messages to Home Assistant for the Proxmox host, NAS, and all VMs/containers
     """
     client = mqtt.Client()
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
