@@ -74,27 +74,44 @@ def get_all_vms():
 
 
 def get_nas_stats(storage_data):
-    # TODO- I think this can be simplified
-    for storage in storage_data:
-        if storage.get("storage") == "nas-public":
-            total_bytes = storage.get("total", 0)
-            used_bytes = storage.get("used", 0)
-            used_fraction = storage.get("used_fraction", 0)
-
-            return [
-                {
-                    "device_id": "proxmox_nas",
-                    "device_model": "NAS",
-                    "friendly_name": "NAS",
-                    "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_nas",
-                    "stats": {
-                        "proxmox_nas_disk_size_tb": round(total_bytes / (1000 ** 4), 2),  # TB
-                        "proxmox_nas_disk_used_gb": round(used_bytes / (1000 ** 3), 2),   # GB
-                        "proxmox_nas_disk_used_percent": round(used_fraction * 100, 1)
-                    }
+    storage = next((s for s in storage_data if s.get("storage") == "nas-public"), None)
+    if storage:
+        return [
+            {
+                "device_id": "proxmox_nas",
+                "device_model": "NAS",
+                "friendly_name": "NAS",
+                "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_nas",
+                "stats": {
+                    "proxmox_nas_disk_size_tb": round(storage.get("total", 0) / (1000 ** 4), 2),  # TB
+                    "proxmox_nas_disk_used_gb": round(storage.get("used", 0) / (1000 ** 3), 2),   # GB
+                    "proxmox_nas_disk_used_percent": round(storage.get("used_fraction", 0) * 100, 1)
                 }
-            ]
+            }
+        ]
     return None
+
+
+
+# def get_host_stats(host_data):
+#         node_status = get_json(f"/nodes/{PROXMOX_NODE}/status")
+#     total_mem = node_status["memory"]["total"]
+#     used_mem = node_status["memory"]["used"]
+#     total_disk = node_status["rootfs"]["total"]
+#     used_disk = node_status["rootfs"]["used"]
+#     stats["host"] = [
+#         {
+#             "device_id": "proxmox_host",
+#             "device_model": "Proxmox Host",
+#             "friendly_name": "Proxmox Host",
+#             "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
+#             "stats": {
+#                 "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
+#                 "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
+#                 "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
+#             }
+#         }
+#     ]
 
 
 def build_friendly_name(vmid, name, vm_type):
@@ -111,12 +128,34 @@ def collect_stats():
     """
     stats = {}
 
+    vms = get_all_vms()
+
+
+
+
+    # TODO- extract this into a separate function
     # Get host node stats
     node_status = get_json(f"/nodes/{PROXMOX_NODE}/status")
-    total_mem = node_status["memory"]["total"]
+    #print(json.dumps(node_status, indent=2))
+    
+    total_mem = node_status["memory"]["total"]   # This is what's not being used by vms and containers right now, not total allocated
+    # for example, host has 16gb of memory, this is showing 13gb right now because add up actual memory usage of all vms/cts is about 3 GB
     used_mem = node_status["memory"]["used"]
+    vm_allocated_mem = sum(vm.get("maxmem", 0) for vm in vms)
+    #print(f"Total Memory: {total_mem} bytes ({round(total_mem/1024/1024/1024)} GB), Used Memory: {used_mem} bytes ({round(used_mem/1024/1024/1024)} GB)")
+
     total_disk = node_status["rootfs"]["total"]
     used_disk = node_status["rootfs"]["used"]
+    
+    total_cpus = node_status["cpuinfo"]["cpus"]
+    vm_allocated_cpus = sum(vm.get("cpus", 0) for vm in vms)
+    unallocated_cpus = total_cpus - vm_allocated_cpus
+
+    unallocated_mem = total_mem - vm_allocated_mem
+
+    #print(f"VMs and containers have allotted memory: {vm_allocated_mem} bytes ({round(vm_allocated_mem / 1024 / 1024 / 1024, 2)} GB)")
+    #print(f"Unallocated memory for host: {unallocated_mem} bytes ({round(unallocated_mem / 1024 / 1024 / 1024, 2)} GB)")
+
     stats["host"] = [
         {
             "device_id": "proxmox_host",
@@ -124,19 +163,36 @@ def collect_stats():
             "friendly_name": "Proxmox Host",
             "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
             "stats": {
+                "proxmox_host_disk_size_gb": math.ceil(total_disk / (1024 ** 3)), 
+                "proxmox_host_unallocated_cpus": unallocated_cpus,
+
+                # TODO LATER- I'm so confused !!!!
+
+                # I want memory to be what's not allocated to VMs, not the total memory of the host
+                # I have 16GB of memory, 11 GB is allotted to vms and containers, I want this to show 5 GB
+                # But Proxmox says the total memory of the host is 13GB (apparently Proxmox, etc is using 3GB of memory),
+                # so that means I have ~ 1.5GB - 2GB of memory for the Proxmox host if all the containers max out
+
+                # Or, is used_mem (which is 5GB) is that what I want? Preoxmox API documentation is not clear. This
+                # looks like it could be true, but everything I see implies it is not
+
+                #"proxmox_host_memory_size_gb": 
+
                 "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
                 "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
                 "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
             }
         }
     ]
+    #stats["host"] = get_host_stats(...)
+
 
 
     # Get VM/container stats
+    # TODO- extract this into a separate function
     stats["vms"] = []
     total_host_mem_MB = total_mem / 1024 / 1024
 
-    vms = get_all_vms()
     for vm in vms:
         vmid = vm["vmid"]
         vm_type = vm["type"]
@@ -147,7 +203,7 @@ def collect_stats():
         mem_alloc = vm_status.get("maxmem", 0) / 1024 / 1024
         mem_used = vm_status.get("mem", 0) / 1024 / 1024
         uptime = vm_status.get("uptime", 0)
-        cores = vm_status.get("cpus", 0)
+        cpus = vm_status.get("cpus", 0)
 
         # Yes, this conversion is weird, but 32GB can be 33-34GB depending on how you do the math
         disk_alloc = math.ceil(vm_status.get("maxdisk", 0) / (1024 ** 3))  # Convert to GiB and round up
@@ -166,7 +222,7 @@ def collect_stats():
                 f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
                 f"{sensor_key_prefix}_disk_used_percent": round(disk_used / disk_alloc * 100, 2) if disk_alloc else 0,
                 f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem_MB * 100, 2),
-                f"{sensor_key_prefix}_cores": cores,
+                f"{sensor_key_prefix}_cpus": cpus,
                 f"{sensor_key_prefix}_memory_allocated_mb": int(mem_alloc),
                 f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc, 2)
             }
@@ -175,14 +231,7 @@ def collect_stats():
         stats["vms"].append(vm_data)
 
     # Get NAS stats
-    storage_data = get_json(f"/nodes/{PROXMOX_NODE}/storage")
-    nas_data = get_nas_stats(storage_data)
-    if nas_data:
-        stats["nas"] = nas_data
-    else:
-        stats["nas"] = {
-            "error": "nas not found"
-        }
+    stats["nas"] = get_nas_stats(get_json(f"/nodes/{PROXMOX_NODE}/storage"))
 
     return stats
 
@@ -197,13 +246,13 @@ def publish_all_stats_to_mqtt(stats):
         for device in devices:
             for sensor_key, value in device["stats"].items():
                 topic = f"{device["state_topic_prefix"]}/{sensor_key}"
-                #client.publish(topic, value, retain=True)
+                client.publish(topic, value, retain=True)
                 print(f"Published {sensor_key} to {topic}: {value}")
 
     client.loop_stop()
 
 
-def publish_discovery_message(client, sensor_key, name, state_topic, device_info, unit=None, device_class=None):
+def publish_discovery_message(client, sensor_key, name, state_topic, device_info, unit=None, device_class=None, icon=None):
     """
     Publish a Home Assistant MQTT discovery message for a sensor.
 
@@ -223,11 +272,13 @@ def publish_discovery_message(client, sensor_key, name, state_topic, device_info
     # Add device_class only if it's not None
     if device_class:
         payload["device_class"] = device_class
+    if icon:
+        payload["icon"] = icon
 
     topic = f"{MQTT_DISCOVERY_TOPIC}/{sensor_key}/config"
     print(f"Publishing discovery message for {name} ({sensor_key}) to {topic} ...")
     print(f"    {json.dumps(payload, indent=2)}")
-    #client.publish(f"{topic}", json.dumps(payload), retain=True)
+    client.publish(f"{topic}", json.dumps(payload), retain=True)
     print(f"Published discovery message to: {topic}")
     
     time.sleep(0.5)  # Add a delay of 0.5 seconds between messages
@@ -239,19 +290,23 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
     """
     sensor_definitions = [
         # Common sensors
-        {"sensor_key": "memory_used_percent", "friendly_name": f"Memory Used", "unit": "%", "device_class": None},
-        {"sensor_key": "disk_used_percent", "friendly_name": f"Disk Used", "unit": "%", "device_class": None},
-        {"sensor_key": "uptime_seconds", "friendly_name": f"Uptime", "unit": "s", "device_class": "duration"},
+        {"sensor_key": "memory_used_percent", "friendly_name": f"Memory Used", "unit": "%", "device_class": None, "icon": "mdi:memory"},
+        {"sensor_key": "disk_used_percent", "friendly_name": f"Disk Used", "unit": "%", "device_class": None, "icon": "mdi:harddisk"},
+        {"sensor_key": "uptime_seconds", "friendly_name": f"Uptime", "unit": "s", "device_class": "duration", "icon": "mdi:progress-clock"},
+
+        # Host-only sensors
+        {"sensor_key": "disk_size_gb", "friendly_name": "Disk Size", "unit": "GB", "device_class": "data_size", "icon": "mdi:harddisk"},
+        {"sensor_key": "unallocated_cpus", "friendly_name": f"Unallocated CPUs", "unit": "", "device_class": None, "icon": "mdi:cpu-64-bit"},
 
         # VM/LXC-only sensors
-        {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None},
-        {"sensor_key": "cores", "friendly_name": f"Cores", "unit": "", "device_class": None},
-        {"sensor_key": "memory_allocated_mb", "friendly_name": f"Memory Allocated", "unit": "MB", "device_class": "data_size"},
-        {"sensor_key": "disk_allocated_gb", "friendly_name": f"Disk Allocated", "unit": "GB", "device_class": "data_size"},
+        {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None, "icon": "mdi:memory"},
+        {"sensor_key": "cpus", "friendly_name": f"CPUs", "unit": "", "device_class": None, "icon": "mdi:cpu-64-bit"},
+        {"sensor_key": "memory_allocated_mb", "friendly_name": f"Memory Allocated", "unit": "MB", "device_class": "data_size", "icon": "mdi:memory"},
+        {"sensor_key": "disk_allocated_gb", "friendly_name": f"Disk Allocated", "unit": "GB", "device_class": "data_size", "icon": "mdi:harddisk"},
     
         # NAS-only sensors
-        {"sensor_key": "disk_size_tb", "friendly_name": "Disk Size", "unit": "TB", "device_class": "data_size"},
-        {"sensor_key": "disk_used_gb", "friendly_name": "Disk Used (GB)", "unit": "GB", "device_class": "data_size"},
+        {"sensor_key": "disk_size_tb", "friendly_name": "Disk Size", "unit": "TB", "device_class": "data_size", "icon": "mdi:harddisk"},
+        {"sensor_key": "disk_used_gb", "friendly_name": "Disk Used", "unit": "GB", "device_class": "data_size", "icon": "mdi:harddisk"},
     ]
 
     device_info = {
@@ -273,13 +328,9 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
             state_topic=f"{state_topic_prefix}/{sensor_key}",
             device_info=device_info,
             unit=sensor_definition["unit"],
-            device_class=sensor_definition["device_class"] if sensor_definition["device_class"] and sensor_definition["device_class"].lower() != "none" else None
+            device_class=sensor_definition["device_class"] if sensor_definition["device_class"] and sensor_definition["device_class"].lower() != "none" else None,
+            icon=sensor_definition["icon"]
         )
-
-
-
-
-
 
 
 def publish_discovery_messages(stats):
