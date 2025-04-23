@@ -23,7 +23,8 @@ MQTT_BROKER = os.getenv("MQTT_BROKER")
 MQTT_PORT = int(os.getenv("MQTT_PORT"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC")
+MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX")
+MQTT_DISCOVERY_TOPIC = os.getenv("MQTT_DISCOVERY_TOPIC")
 # ====== END CONFIGURATION ======
 
 
@@ -57,36 +58,51 @@ def get_all_vms():
     """
     Retrieves all VMs and containers from all Proxmox nodes,
     explicitly adding a 'type' field to each for consistency.
+
+    Assumes a single Proxmox node for simplicity of code
     """
     all_vms = []
-    nodes = get_json("/nodes")
-    for node in nodes:
-        node_name = node["node"]
+    for vm in get_json(f"/nodes/{PROXMOX_NODE}/qemu"):
+        vm["type"] = "qemu"
+        all_vms.append(vm)
 
-        for vm in get_json(f"/nodes/{node_name}/qemu"):
-            vm["type"] = "qemu"
-            all_vms.append(vm)
-
-        for vm in get_json(f"/nodes/{node_name}/lxc"):
-            vm["type"] = "lxc"
-            all_vms.append(vm)
+    for vm in get_json(f"/nodes/{PROXMOX_NODE}/lxc"):
+        vm["type"] = "lxc"
+        all_vms.append(vm)
 
     return all_vms
 
 
 def get_nas_stats(storage_data):
+    # TODO- I think this can be simplified
     for storage in storage_data:
         if storage.get("storage") == "nas-public":
             total_bytes = storage.get("total", 0)
             used_bytes = storage.get("used", 0)
             used_fraction = storage.get("used_fraction", 0)
 
-            return {
-                "nas_disk_size_tb": round(total_bytes / (1000 ** 4), 2),  # TB
-                "nas_disk_used_gb": round(used_bytes / (1000 ** 3), 2),   # GB
-                "nas_disk_used_percent": round(used_fraction * 100, 1)
-            }
+            return [
+                {
+                    "device_id": "proxmox_nas",
+                    "device_model": "NAS",
+                    "friendly_name": "NAS",
+                    "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_nas",
+                    "stats": {
+                        "proxmox_nas_disk_size_tb": round(total_bytes / (1000 ** 4), 2),  # TB
+                        "proxmox_nas_disk_used_gb": round(used_bytes / (1000 ** 3), 2),   # GB
+                        "proxmox_nas_disk_used_percent": round(used_fraction * 100, 1)
+                    }
+                }
+            ]
     return None
+
+
+def build_friendly_name(vmid, name, vm_type):
+    """
+    Build a friendly name for the sensor based on the VM type and ID.
+    """
+    friendly_name = name or f"{vm_type} {vmid}"
+    return f"{friendly_name.replace('_', ' ').replace('-', ' ').title()} {'VM' if vm_type == 'qemu' else 'LXC'}"
 
 
 def collect_stats():
@@ -97,18 +113,24 @@ def collect_stats():
 
     # Get host node stats
     node_status = get_json(f"/nodes/{PROXMOX_NODE}/status")
-
     total_mem = node_status["memory"]["total"]
     used_mem = node_status["memory"]["used"]
     total_disk = node_status["rootfs"]["total"]
     used_disk = node_status["rootfs"]["used"]
+    stats["host"] = [
+        {
+            "device_id": "proxmox_host",
+            "device_model": "Proxmox Host",
+            "friendly_name": "Proxmox Host",
+            "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
+            "stats": {
+                "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
+                "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
+                "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
+            }
+        }
+    ]
 
-    stats["host"] = {
-        "name": PROXMOX_NODE,
-        "proxmox_host_memory_used_percent": round(used_mem / total_mem * 100, 2),
-        "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
-        "proxmox_host_uptime_seconds": node_status.get("uptime", 0),
-    }
 
     # Get VM/container stats
     stats["vms"] = []
@@ -134,15 +156,20 @@ def collect_stats():
         sensor_key_prefix = f"proxmox_{vm_type}_{vmid}"
         vm_data = {
             "vmid": str(vmid),
-            "name": vm_status.get("name", f"{vm_type}-{vmid}"),
             "type": vm_type,
-            f"{sensor_key_prefix}_uptime_seconds": uptime,
-            f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
-            f"{sensor_key_prefix}_disk_used_percent": round(disk_used / disk_alloc * 100, 2) if disk_alloc else 0,
-            f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem_MB * 100, 2),
-            f"{sensor_key_prefix}_cores": cores,
-            f"{sensor_key_prefix}_memory_allocated_mb": int(mem_alloc),
-            f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc, 2),
+            "friendly_name": build_friendly_name(vmid, vm_status.get("name"), vm_type),
+            "device_id": sensor_key_prefix,
+            "device_model": "VM" if vm_type == "qemu" else "LXC",
+            "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_{vm_type}/{vmid}",
+            "stats": {
+                f"{sensor_key_prefix}_uptime_seconds": uptime,
+                f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
+                f"{sensor_key_prefix}_disk_used_percent": round(disk_used / disk_alloc * 100, 2) if disk_alloc else 0,
+                f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem_MB * 100, 2),
+                f"{sensor_key_prefix}_cores": cores,
+                f"{sensor_key_prefix}_memory_allocated_mb": int(mem_alloc),
+                f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc, 2)
+            }
         }
 
         stats["vms"].append(vm_data)
@@ -166,46 +193,28 @@ def publish_all_stats_to_mqtt(stats):
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
 
-    # Publish host stats
-    for key, value in stats["host"].items():
-        topic = f"{MQTT_TOPIC}/proxmox_host/{key}"
-        #client.publish(topic, value, retain=True)
-        #print(f"Published {key} to {topic}: {value}")
-
-    # Publish each VM/container's stats
-    for vm in stats["vms"]:
-        vmid = vm["vmid"]
-        for key, value in vm.items():
-            if vmid != "100":
-                continue
-            if key in ["vmid"]:
-                continue  # Do not want to publish these values
-
-            topic = f"{MQTT_TOPIC}/proxmox_{vm["type"]}/{vmid}/{key}"
-            # TODO- uncomment the below once I validate the nas stats
-            #client.publish(topic, value, retain=True)
-            print(f"Published {key} to {topic}: {value}")
-
-    # Publish NAS stats
-    if "nas" in stats:
-        for key, value in stats["nas"].items():
-            topic = f"{MQTT_TOPIC}/nas/{key}"
-            # TODO- Is right, just needs enabled
-            #client.publish(topic, value, retain=True)
-            #print(f"Published {key} to {topic}: {value}")
+    for category, devices in stats.items():
+        for device in devices:
+            for sensor_key, value in device["stats"].items():
+                topic = f"{device["state_topic_prefix"]}/{sensor_key}"
+                #client.publish(topic, value, retain=True)
+                print(f"Published {sensor_key} to {topic}: {value}")
 
     client.loop_stop()
 
 
-def publish_discovery_message(client, sensor_key, name, state_topic, unique_id, object_id, device_info, unit=None, device_class=None):
+def publish_discovery_message(client, sensor_key, name, state_topic, device_info, unit=None, device_class=None):
     """
     Publish a Home Assistant MQTT discovery message for a sensor.
+
+    I like this function being dumb- it just takes the parameters and publishes the message
     """
+
     payload = {
         "name": name,
         "state_topic": state_topic,
-        "unique_id": unique_id,
-        "object_id": object_id,
+        "unique_id": sensor_key,
+        "object_id": sensor_key,
         "device": device_info,
         "unit_of_measurement": unit,
         "state_class": "measurement"
@@ -215,102 +224,65 @@ def publish_discovery_message(client, sensor_key, name, state_topic, unique_id, 
     if device_class:
         payload["device_class"] = device_class
 
-    topic_base = f"homeassistant/sensor/{object_id}"
-    print(f"Publishing discovery message for {name} ({sensor_key}) to {topic_base}/config ...")
+    topic = f"{MQTT_DISCOVERY_TOPIC}/{sensor_key}/config"
+    print(f"Publishing discovery message for {name} ({sensor_key}) to {topic} ...")
     print(f"    {json.dumps(payload, indent=2)}")
-    #client.publish(f"{topic_base}/config", json.dumps(payload), retain=True)
-    print(f"Published discovery message to: {topic_base}/config")
+    #client.publish(f"{topic}", json.dumps(payload), retain=True)
+    print(f"Published discovery message to: {topic}")
     
     time.sleep(0.5)  # Add a delay of 0.5 seconds between messages
 
 
-def publish_nas_discovery_messages(client):
-    """
-    Publish discovery messages for NAS-related sensors.
-    """
-    device_info = {
-        "identifiers": ["nas_storage"],
-        "name": "NAS",
-        "manufacturer": "Proxmox",
-        "model": "External NAS Storage"
-    }
-
-    nas_sensors = [
-        {"sensor_key": "nas_disk_size_tb", "friendly_name": "Disk Size", "unit": "TB", "device_class": "data_size"},
-        {"sensor_key": "nas_disk_used_gb", "friendly_name": "Disk Used (GB)", "unit": "GB", "device_class": "data_size"},
-        {"sensor_key": "nas_disk_used_percent", "friendly_name": "Disk Used (%)", "unit": "%", "device_class": None}
-    ]
-
-    for sensor in nas_sensors:
-        print(f"Processing discovery for sensor: {sensor['sensor_key']}")
-        state_topic = f"{MQTT_TOPIC}/nas/{sensor['sensor_key']}"
-        object_id = unique_id = f"{sensor['sensor_key']}"
-
-        publish_discovery_message(
-            client,
-            sensor_key=sensor["sensor_key"],
-            name=sensor["friendly_name"],
-            state_topic=state_topic,
-            unique_id=unique_id,
-            object_id=object_id,
-            device_info=device_info,
-            unit=sensor["unit"],
-            device_class=sensor["device_class"]
-        )
-
-
-def generate_sensor_definitions(name, is_host=False):
-    """
-    Generate sensor definitions for VMs/CTs or the host.
-    """
-    base_sensors = [
-        {"sensor_key": "memory_used_percent", "friendly_name": f"Memory Used", "unit": "%", "device_class": None},
-        {"sensor_key": "disk_used_percent", "friendly_name": f"Disk Used", "unit": "%", "device_class": None},
-        {"sensor_key": "uptime_seconds", "friendly_name": f"Uptime", "unit": "s", "device_class": "duration"}
-    ]
-
-    if not is_host:
-        additional_sensors = [
-            {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None},
-            {"sensor_key": "cores", "friendly_name": f"Cores", "unit": "", "device_class": None},
-            {"sensor_key": "memory_allocated_mb", "friendly_name": f"Memory Allocated", "unit": "MB", "device_class": "data_size"},
-            {"sensor_key": "disk_allocated_gb", "friendly_name": f"Disk Allocated", "unit": "GB", "device_class": "data_size"}
-        ]
-        base_sensors.extend(additional_sensors)
-
-    return base_sensors
-
-
-def publish_sensor_discovery(client, vmid, name, sensor_definitions, is_host=False):
+def publish_sensor_discovery_by_device(client, device_id, device_model, device_friendly_name, state_topic_prefix, device_stats):
     """
     Publish discovery messages for a set of sensors.
     """
-    device_info = {
-        "identifiers": [str(vmid)],
-        "manufacturer": "Proxmox",
-        "model": "VM/CT" if not is_host else "Host",
-        "name": name,
-    }
+    sensor_definitions = [
+        # Common sensors
+        {"sensor_key": "memory_used_percent", "friendly_name": f"Memory Used", "unit": "%", "device_class": None},
+        {"sensor_key": "disk_used_percent", "friendly_name": f"Disk Used", "unit": "%", "device_class": None},
+        {"sensor_key": "uptime_seconds", "friendly_name": f"Uptime", "unit": "s", "device_class": "duration"},
 
-    for sensor in sensor_definitions:
-        base_id = f"proxmox_{'host' if is_host else f'vm{vmid}'}"
-        state_topic = f"{MQTT_TOPIC}/{base_id}/{base_id}_{sensor['sensor_key']}"
-        object_id = unique_id = f"{base_id}_{sensor['sensor_key']}"
+        # VM/LXC-only sensors
+        {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None},
+        {"sensor_key": "cores", "friendly_name": f"Cores", "unit": "", "device_class": None},
+        {"sensor_key": "memory_allocated_mb", "friendly_name": f"Memory Allocated", "unit": "MB", "device_class": "data_size"},
+        {"sensor_key": "disk_allocated_gb", "friendly_name": f"Disk Allocated", "unit": "GB", "device_class": "data_size"},
+    
+        # NAS-only sensors
+        {"sensor_key": "disk_size_tb", "friendly_name": "Disk Size", "unit": "TB", "device_class": "data_size"},
+        {"sensor_key": "disk_used_gb", "friendly_name": "Disk Used (GB)", "unit": "GB", "device_class": "data_size"},
+    ]
+
+    device_info = {
+        "identifiers": [device_id],
+        "manufacturer": "Proxmox",
+        "model": device_model,
+        "name": device_friendly_name,
+    }
+    
+    # Loop through all the list of sensors and publish discovery messages for each one
+    for sensor_key, value in device_stats.items():
+        # Find the appropriate sensor definition
+        sensor_definition = next((s for s in sensor_definitions if sensor_key.endswith(s["sensor_key"])), None)
 
         publish_discovery_message(
             client,
-            sensor_key=object_id,
-            name=sensor["friendly_name"],
-            state_topic=state_topic,
-            unique_id=unique_id,
-            object_id=object_id,
+            sensor_key=sensor_key,
+            name=sensor_definition["friendly_name"],
+            state_topic=f"{state_topic_prefix}/{sensor_key}",
             device_info=device_info,
-            unit=sensor["unit"],
-            device_class=sensor["device_class"] if sensor["device_class"] and sensor["device_class"].lower() != "none" else None
+            unit=sensor_definition["unit"],
+            device_class=sensor_definition["device_class"] if sensor_definition["device_class"] and sensor_definition["device_class"].lower() != "none" else None
         )
 
 
-def publish_discovery_messages():
+
+
+
+
+
+def publish_discovery_messages(stats):
     """
     Publish MQTT discovery messages for all VMs/CTs, host, and NAS to Home Assistant.
     """
@@ -318,26 +290,11 @@ def publish_discovery_messages():
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
-    # === Publish Host Discovery ===
-    host_name = "Proxmox Host"
-    host_sensor_definitions = generate_sensor_definitions(host_name, is_host=True)
-    # TODO- uncomment the below once I validate the nas stats
-    #publish_sensor_discovery(client, "", host_name, host_sensor_definitions, is_host=True)
+    for device_category, devices in stats.items():
+        for device in devices:
+            publish_sensor_discovery_by_device(client, device["device_id"], device["device_model"], device["friendly_name"], device["state_topic_prefix"], device["stats"])
 
-    # === Publish VM/CT Discovery ===
-    vms = get_all_vms()
-    for vm in vms:
-        vmid = vm["vmid"]
-        if vmid != 100:
-            continue
-        name = vm["name"].replace("_", " ").replace("-", " ").title()
-        sensor_definitions = generate_sensor_definitions(name)
-        # TODO- uncomment the below once I validate the nas stats
-        publish_sensor_discovery(client, vmid, name, sensor_definitions)
-
-    # === Publish NAS Discovery ===
-    # TODO- Is right, just needs enabled
-    #publish_nas_discovery_messages(client)
+    client.loop_stop()
 
 
 
@@ -350,7 +307,7 @@ if __name__ == "__main__":
     publish_all_stats_to_mqtt(stats)
 
     if args.publish_discovery:
-        publish_discovery_messages()
+        publish_discovery_messages(stats)
 
     print("Stats published to MQTT.")
 
