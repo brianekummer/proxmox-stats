@@ -7,6 +7,7 @@ import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 import os
 import math
+from datetime import datetime
 
 
 # NOTES
@@ -254,6 +255,7 @@ def collect_stats():
 
 
 def publish_all_stats_to_mqtt(stats):
+    print(f"Publishing stats to MQTT at {datetime.now()}")
     client = mqtt.Client()
     client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
