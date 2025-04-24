@@ -268,6 +268,10 @@ def publish_all_stats_to_mqtt(stats):
                 client.publish(topic, value, retain=True)
                 print(f"Published {sensor_key} to {topic}: {value}")
 
+                # Home Assistant seems to require a short delay between messages to avoid overwhelming the broker
+                time.sleep(0.5)
+
+
     client.loop_stop()
 
 
@@ -298,7 +302,7 @@ def publish_discovery_message(client, sensor_key, name, state_topic, device_info
     client.publish(f"{topic}", json.dumps(payload), retain=True)
     print(f"Published discovery message to: {topic}")
 
-    # Home Assistant requires a short delay between discovery messages to avoid overwhelming the broker
+    # Home Assistant seems to require a short delay between messages to avoid overwhelming the broker
     time.sleep(0.5)
 
 
