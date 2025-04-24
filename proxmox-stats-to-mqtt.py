@@ -7,7 +7,7 @@ import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 import os
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 # NOTES
@@ -141,6 +141,10 @@ def get_host_stats(vms):
     #print(f"VMs and containers have allotted memory: {vm_allocated_mem} bytes ({round(vm_allocated_mem / 1024 / 1024 / 1024, 2)} GB)")
     #print(f"Unallocated memory for host: {unallocated_mem} bytes ({round(unallocated_mem / 1024 / 1024 / 1024, 2)} GB)")
 
+    uptime_seconds = node_status.get("uptime", 0)
+    last_boot_time = int(time.time()) - int(uptime_seconds)
+    last_boot_time_iso = datetime.fromtimestamp(last_boot_time, tz=timezone.utc).isoformat()
+
     return [
         {
             "device_id": "proxmox_host",
@@ -170,7 +174,7 @@ def get_host_stats(vms):
 
                 "proxmox_host_memory_used_percent": round(used_mem / total_host_mem * 100, 2),
                 "proxmox_host_disk_used_percent": round(used_disk / total_disk * 100, 2),
-                "proxmox_host_uptime_seconds": node_status.get("uptime", 0)
+                "proxmox_host_last_boot_time": last_boot_time_iso
             }
         }
     ]
@@ -181,7 +185,9 @@ def get_vm_stats(vmid, vm_type, total_host_mem):
 
     mem_alloc = vm_status.get("maxmem", 0)
     mem_used = vm_status.get("mem", 0)
-    uptime = vm_status.get("uptime", 0)
+    uptime_seconds = vm_status.get("uptime", 0)
+    last_boot_time = int(time.time()) - int(uptime_seconds)
+    last_boot_time_iso = datetime.fromtimestamp(last_boot_time, tz=timezone.utc).isoformat()
     cpus = vm_status.get("cpus", 0)
 
     # Yes, this conversion is weird, but 32GB can be 32-34GB depending on how you do the math,
@@ -197,7 +203,7 @@ def get_vm_stats(vmid, vm_type, total_host_mem):
         "device_model": "VM" if vm_type == "qemu" else "LXC",
         "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_{vm_type}/{vmid}",
         "stats": {
-            f"{sensor_key_prefix}_uptime_seconds": uptime,
+            f"{sensor_key_prefix}_last_boot_time": last_boot_time_iso,
             f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
             f"{sensor_key_prefix}_disk_used_percent": round(disk_used_gb / disk_alloc_gb * 100, 2) if disk_alloc_gb else 0,
             f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem * 100, 2),
@@ -310,11 +316,11 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
         # Common sensors
         {"sensor_key": "memory_used_percent", "friendly_name": f"Memory Used", "unit": "%", "device_class": None, "icon": "mdi:memory"},
         {"sensor_key": "disk_used_percent", "friendly_name": f"Disk Used", "unit": "%", "device_class": None, "icon": "mdi:harddisk"},
-        {"sensor_key": "uptime_seconds", "friendly_name": f"Uptime", "unit": "s", "device_class": "duration", "icon": "mdi:progress-clock"},
+        {"sensor_key": "last_boot_time", "friendly_name": f"Last Boot Time", "unit": None, "device_class": "timestamp", "icon": "mdi:clock-outline"},
 
         # Host-only sensors
         {"sensor_key": "disk_size_gb", "friendly_name": "Disk Size", "unit": "GB", "device_class": "data_size", "icon": "mdi:harddisk"},
-        {"sensor_key": "unallocated_cpus", "friendly_name": f"Unallocated CPUs", "unit": "", "device_class": None, "icon": "mdi:cpu-64-bit"},
+        {"sensor_key": "unallocated_cpus", "friendly_name": f"Unallocated CPUs", "unit": None, "device_class": None, "icon": "mdi:cpu-64-bit"},
 
         # VM/LXC-only sensors
         {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None, "icon": "mdi:memory"},
