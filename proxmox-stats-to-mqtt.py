@@ -262,7 +262,7 @@ def publish_all_stats_to_mqtt(stats):
     for category, devices in stats.items():
         for device in devices:
             for sensor_key, value in device["stats"].items():
-                topic = f"{device["state_topic_prefix"]}/{sensor_key}"
+                topic = f"{device['state_topic_prefix']}/{sensor_key}"
                 client.publish(topic, value, retain=True)
                 print(f"Published {sensor_key} to {topic}: {value}")
 
