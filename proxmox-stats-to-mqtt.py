@@ -9,12 +9,14 @@ import os
 import math
 
 
+# NOTES
+#   - Every time mqtt.Client() is called, it logs the following warning
+#     "DeprecationWarning: Callback API version 1 is deprecated, update to latest version"
+#     - I tried to fix it multiple ways. The docs here https://github.com/eclipse-paho/paho.mqtt.python/blob/master/docs/migrations.rst#change-between-version-1x-and-20
+#       say that 
+#          client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)    
+#       should work, but it doesn't. I don't know why. I don't care enough to figure it out right now.
 
-#
-# GB (Gigabyte) and GiB (Gibibyte) are both units of digital storage, but they differ in their base measurement.
-#   - GB uses the decimal system, 1 GB equals 1,000,000,000 bytes
-#   - GiB uses the binary system, 1 GiB equals 1,073,741,824 bytes
-#
 
 
 # ====== CONFIGURATION ======
