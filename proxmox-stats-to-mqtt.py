@@ -268,10 +268,6 @@ def publish_all_stats_to_mqtt(stats):
                 client.publish(topic, value, retain=True)
                 print(f"Published {sensor_key} to {topic}: {value}")
 
-                # Home Assistant seems to require a short delay between messages to avoid overwhelming the broker
-                time.sleep(0.5)
-
-
     client.loop_stop()
 
 
