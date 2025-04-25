@@ -36,12 +36,6 @@ MQTT_USERNAME = os.getenv("MQTT_USERNAME")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX")
 MQTT_DISCOVERY_TOPIC = os.getenv("MQTT_DISCOVERY_TOPIC")
-
-
-# This needs to change, but is acceptable for now
-SSH_HOST = os.getenv("SSH_HOST")
-SSH_USERNAME = os.getenv("SSH_USERNAME")
-SSH_KEY_PATH = os.getenv("SSH_KEY_PATH")
 # ====== END CONFIGURATION ======
 
 
@@ -119,12 +113,12 @@ def get_friendly_name(vmid, name, vm_type):
     return f"{friendly_name.replace('_', ' ').replace('-', ' ').title()} {'VM' if vm_type == 'qemu' else 'LXC'}"
 
 
-def get_vm_disk_usage(ssh_host, ssh_username):
+def get_vm_disk_usage(ssh_host, ssh_username, ssh_key_path):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     # Connect to HA VM
-    ssh.connect(ssh_host, username=ssh_username, key_filename=SSH_KEY_PATH)
+    ssh.connect(ssh_host, username=ssh_username, key_filename=ssh_key_path)
 
     # Run the df command, use awk to get the 5th column of the second line (used percentage)
     stdin, stdout, stderr = ssh.exec_command("df -h / | awk 'NR==2 { print $5 }'")
@@ -219,13 +213,13 @@ def get_vm_stats(vmid, vm_type, total_host_mem):
     # and doing it this way yields 32GB- convert to GiB and then round up.
     disk_alloc_gb = math.ceil(bytes_to_gib(vm_status.get("maxdisk", 0)))
 
-
-
-    # TODO- This is very hacky and hard-coded for my HA setup
-    # One option would be to have the env var reference the vmid, like maybe have
-    #    SSH_HOST_QEMU_100=xxxx and SSH_USERNAME_QEMU_100=xxxxx
+    # The Proxmox API can't get the disk usage of a VM, so we have to SSH into the VM to get it
+    # Environment variables are set in the .env file for each VM and include the vmid
     if vmid == 100:
-        vm_disk_used_percent = get_vm_disk_usage(SSH_HOST, SSH_USERNAME)
+        ssh_host = os.getenv(f"SSH_HOST_QEMU_{vmid}")
+        ssh_username = os.getenv(f"SSH_USERNAME_QEMU_{vmid}")
+        ssh_keypath = os.getenv(f"SSH_KEY_PATH_QEMU_{vmid}")
+        vm_disk_used_percent = get_vm_disk_usage(ssh_host, ssh_username, ssh_keypath)
     else:
         disk_used_gb = math.ceil(bytes_to_gib(vm_status.get("disk", 0)))
         vm_disk_used_percent = round(disk_used_gb / disk_alloc_gb * 100, 2) if disk_alloc_gb else 0
