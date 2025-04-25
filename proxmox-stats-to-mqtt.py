@@ -224,8 +224,6 @@ def get_vm_stats(vmid, vm_type, total_host_mem):
         disk_used_gb = math.ceil(bytes_to_gib(vm_status.get("disk", 0)))
         vm_disk_used_percent = round(disk_used_gb / disk_alloc_gb * 100, 2) if disk_alloc_gb else 0
 
-
-
     return {
         "friendly_name": get_friendly_name(vmid, vm_status.get("name"), vm_type),
         "device_id": sensor_key_prefix,
