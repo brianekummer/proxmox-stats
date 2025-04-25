@@ -181,10 +181,11 @@ def get_host_stats(vms):
             "device_model": "Proxmox Host",
             "friendly_name": "Proxmox Host",
 
-            # In collect_stats(), I want to know what percentage of the host memory is used by
-            # each VMs/container, so I need to pass this back so it is available for that
-            # calculation
+            # In collect_stats(), I want to know what percentage of the host's memory and 
+            # CPUs are used by each VMs/container, so I need to pass these total values back
+            # so they are available for those calculations
             "total_host_mem": total_host_mem,
+            "total_host_cpus": total_cpus,
 
             "state_topic_prefix": f"{MQTT_TOPIC_PREFIX}/proxmox_host",
             "stats": {
@@ -212,15 +213,16 @@ def get_host_stats(vms):
     ]
 
 
-def get_vm_stats(proxmox_node, vmid, vm_type, total_host_mem):
+def get_vm_stats(proxmox_node, vmid, vm_type, total_host_mem, total_host_cpus):
     """
     Get the stats for a VM or container
 
-    Oddities - The Proxmox API...
+    Notes - The Proxmox API...
       - Returns uptime as second (i.e. it's been up for 625,536 seconds)
         and we convert it to an HA timestamp that is the date/time of the last boot,
         such as 2023-10-01T12:00:00Z
-      - The 
+      - Returns the CPU usage as a fraction of one CPU (i.e. 0.5 means 50% of one CPU),
+        so we divide it by the number of CPUs to get the percentage of the total CPU
       - Cannot get the disk usage of a VM- it always returns 0%. So I have a function
         that SSH's into the VM and runs a linux command to get the disk usage percentage
           - This is configured by setting environment variables for each VM, with the 
@@ -236,6 +238,7 @@ def get_vm_stats(proxmox_node, vmid, vm_type, total_host_mem):
     mem_alloc = vm_status.get("maxmem", 0)
     mem_used = vm_status.get("mem", 0)
     cpus = vm_status.get("cpus", 0)
+    cpu_fraction = vm_status.get("cpu", 0)
     disk_alloc_gb = math.ceil(bytes_to_gib(vm_status.get("maxdisk", 0)))
 
     # Convert uptime to last boot time
@@ -263,7 +266,8 @@ def get_vm_stats(proxmox_node, vmid, vm_type, total_host_mem):
             f"{sensor_key_prefix}_last_boot_time": last_boot_time_iso,
             f"{sensor_key_prefix}_memory_used_percent": round(mem_used / mem_alloc * 100, 2) if mem_alloc else 0,
             f"{sensor_key_prefix}_disk_used_percent": vm_disk_used_percent,
-            f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem * 100, 2),
+            f"{sensor_key_prefix}_percent_of_host_memory": round(mem_used / total_host_mem * 100, 2) if total_host_mem else 0,
+            f"{sensor_key_prefix}_percent_of_host_cpu": round(cpu_fraction / total_host_cpus * 100, 2) if total_host_cpus else 0,
             f"{sensor_key_prefix}_cpus": cpus,
             f"{sensor_key_prefix}_memory_allocated_mb": int(bytes_to_mib(mem_alloc)),
             f"{sensor_key_prefix}_disk_allocated_gb": round(disk_alloc_gb, 2)
@@ -312,7 +316,7 @@ def collect_stats():
     }
 
     for vm in vms:
-        vm_stats = get_vm_stats(PROXMOX_NODE, vm["vmid"], vm["type"], stats["host"][0]["total_host_mem"])
+        vm_stats = get_vm_stats(PROXMOX_NODE, vm["vmid"], vm["type"], stats["host"][0]["total_host_mem"], stats["host"][0]["total_host_cpus"])
         stats["vms"].append(vm_stats)
 
     return stats
@@ -385,6 +389,7 @@ def publish_sensor_discovery_by_device(client, device_id, device_model, device_f
 
         # VM/LXC-only sensors
         {"sensor_key": "percent_of_host_memory", "friendly_name": f"% of Host Memory", "unit": "%", "device_class": None, "icon": "mdi:memory"},
+        {"sensor_key": "percent_of_host_cpu", "friendly_name": f"% of Host CPU", "unit": "%", "device_class": None, "icon": "mdi:cpu-64-bit"},
         {"sensor_key": "cpus", "friendly_name": f"CPUs", "unit": "", "device_class": None, "icon": "mdi:cpu-64-bit"},
         {"sensor_key": "memory_allocated_mb", "friendly_name": f"Memory Allocated", "unit": "MB", "device_class": "data_size", "icon": "mdi:memory"},
         {"sensor_key": "disk_allocated_gb", "friendly_name": f"Disk Allocated", "unit": "GB", "device_class": "data_size", "icon": "mdi:harddisk"},
