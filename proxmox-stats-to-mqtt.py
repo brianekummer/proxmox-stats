@@ -356,12 +356,16 @@ def publish_discovery_message(client, sensor_key, name, state_topic, device_info
         "object_id": sensor_key,
         "device": device_info,
         "unit_of_measurement": unit,
-        "state_class": "measurement"
     }
 
-    # Add device_class and icon only if they're not None
+    # Only set state_class if device_class is not 'timestamp'
     if device_class:
         payload["device_class"] = device_class
+        if device_class != "timestamp":
+            payload["state_class"] = "measurement"
+    else:
+        payload["state_class"] = "measurement"
+
     if icon:
         payload["icon"] = icon
 
